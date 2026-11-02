@@ -64,4 +64,4 @@ Milestones follow the spec's deliverables 1–6. Each milestone's exit is its PR
 
 ## 4. Explicit non-goals (current build)
 
-No hardware, no PCB bring-up, no field trials, no ROS 2 deployment claim, no Gazebo dependency, and no changes to the unrelated InsmartFix documents already in the repository. A ROS 2 bridge can be an adapter later; it is not the spine now.
+No hardware, no PCB bring-up, no field trials, no ROS 2 deployment claim, and no Gazebo dependency. A ROS 2 bridge can be an adapter later; it is not the spine now.
