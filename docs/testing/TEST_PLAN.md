@@ -1,6 +1,6 @@
 # InsmartFix v1 — Test Plan & Test Environments
 
-**Version:** 1.0-draft · **Date:** 2026-11-02 · **Status:** ⏳ Reviewed at G1 together with the spec; executed in S4–S5; results judged at **G2 Test Review**.
+**Version:** 1.0-draft · **Date:** 2026-11-02 · **Status:** ✅ Approved at G1 with the spec; executed in S4–S5; results judged at **G2 Test Review**.
 **Traces to:** [`docs/specs/INSMARTFIX_V1_SPEC.md`](../specs/INSMARTFIX_V1_SPEC.md) (FR/NFR IDs).
 
 ---
