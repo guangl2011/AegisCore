@@ -26,3 +26,30 @@ jobs:
 
       - name: Pytest
         run: pytest -v
+
+  evidence:
+    # NSF Phase I evidence gates: the 100-trajectory corpus + fault matrix must
+    # clear translation-p99, fail-safe, violation, and logging gates within the
+    # 10-minute budget. A failed gate fails CI — the pitch may only cite
+    # numbers this run produces.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package
+        run: pip install -e .
+
+      - name: Bench harness (100-trajectory corpus + fault matrix)
+        run: python -m aegiscore.harness --output benchmarks/latest.json
+
+      - name: Upload metrics snapshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-metrics
+          path: benchmarks/latest.json
