@@ -74,6 +74,10 @@ class RobotState:
     angular_velocity: float  # rad/s
     actuator_states: dict[str, float]  # actuator id -> measured state
     last_heartbeat_us: int  # monotonic microseconds of last host heartbeat
+    # Proximity sensor reading (nearest obstacle, metres). None = sensor not
+    # fitted; NaN/inf = sensor loss. Consumed by the governor's proximity
+    # envelope — additive with a default so existing constructors keep working.
+    nearest_obstacle_m: float | None = None
 
 
 @dataclass
