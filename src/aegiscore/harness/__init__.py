@@ -14,6 +14,13 @@ Public API:
 - ``python -m aegiscore.harness`` — the CI entry point.
 """
 
+from aegiscore.harness.advisory_exp import (
+    ADVISORY_EXPERIMENT_SEED,
+    AdvisoryExperimentConfig,
+    AdvisoryExperimentMetrics,
+    AdvisoryWiring,
+    StubAdvisoryProvider,
+)
 from aegiscore.harness.metrics import (
     FAIL_SAFE_LIMIT_US,
     P99_TRANSLATION_LIMIT_NS,
@@ -35,6 +42,8 @@ from aegiscore.harness.runner import (
     TrajectoryRunResult,
     element_plan,
     executed_twist,
+    fault_onsets,
+    run_advisory_experiment,
     run_benchmark,
     run_fault_matrix,
     run_fault_scenario,
@@ -43,15 +52,22 @@ from aegiscore.harness.runner import (
 
 __all__ = [
     "FAULT_MATRIX_SEED",
+    "ADVISORY_EXPERIMENT_SEED",
     "SAFE_STATES",
     "BenchConfig",
     "BreachSeed",
     "ElementPlan",
     "TrajectoryRunResult",
+    "AdvisoryExperimentConfig",
+    "AdvisoryExperimentMetrics",
+    "AdvisoryWiring",
+    "StubAdvisoryProvider",
+    "run_advisory_experiment",
     "run_benchmark",
     "run_fault_matrix",
     "run_fault_scenario",
     "run_nominal_trajectory",
+    "fault_onsets",
     "element_plan",
     "executed_twist",
     "BenchmarkMetrics",

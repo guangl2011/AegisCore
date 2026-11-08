@@ -326,6 +326,20 @@ def test_full_benchmark_translation_latency_measured_per_chassis(full_metrics) -
         assert report.p99_ns < P99_TRANSLATION_LIMIT_NS
 
 
+def test_full_benchmark_advisory_experiment_block(full_metrics) -> None:
+    # The advisory pass rides the default configuration: the CI evidence run
+    # always carries the block, and it must be green like the rest.
+    adv = full_metrics.advisory
+    assert adv is not None
+    assert adv.polls > 0
+    assert adv.constraints_offered == adv.accepted + adv.rejected_stale
+    assert adv.advisory_descents > 0
+    assert adv.rejected_stale > 0
+    assert adv.issuance_latency_ns is not None
+    assert adv.consumption_latency_ns is not None
+    assert gate_report(full_metrics).passed
+
+
 def test_harness_determinism_two_runs_byte_identical() -> None:
     first = metrics_to_json(run_benchmark(BenchConfig(clock=DET_CLOCK)))
     second = metrics_to_json(run_benchmark(BenchConfig(clock=DET_CLOCK)))

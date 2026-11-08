@@ -16,7 +16,10 @@ Gate thresholds implement the CI evidence table in ``docs/aegiscore/TESTING_PLAN
 - zero kinematic violations anywhere in the pipeline;
 - 100% decision-logging completeness (one safety-log record per governor cycle);
 - every fault-matrix scenario terminates in its defined safe state (at or
-  below the mapped rung on the failover ladder).
+  below the mapped rung on the failover ladder);
+- the advisory experiment pass (stub providers) observed advisory-driven
+  margin descents — evaluated only when the advisory pass is enabled, which
+  the default configuration always does.
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
+from aegiscore.harness.advisory_exp import AdvisoryExperimentMetrics
 from aegiscore.scal.instrumentation import LatencyReport
 
 #: Translation p99 at or above this fails the run (Phase I aim: < 5 ms).
@@ -35,7 +39,7 @@ FAIL_SAFE_LIMIT_US = 50_000
 #: The CI budget for a full corpus + fault-matrix run (TESTING_PLAN §1).
 RUNTIME_BUDGET_S = 600.0
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -53,6 +57,7 @@ class GateReport:
             "no_kinematic_violations",
             "all_decisions_logged",
             "all_scenarios_in_defined_safe_state",
+            "advisory_descents_observed",
         )
         return {name: name not in self.failures for name in names}
 
@@ -65,8 +70,14 @@ def evaluate_gates(
     decision_logging_completeness: float,
     scenarios_in_defined_safe_state: int,
     scenario_count: int,
+    advisory_descents: int | None = None,
 ) -> GateReport:
-    """Pure gate evaluation — the same function the CI step and tests call."""
+    """Pure gate evaluation — the same function the CI step and tests call.
+
+    ``advisory_descents=None`` means the advisory experiment pass was disabled
+    for this run; that gate is then not evaluated (the default configuration
+    always enables the pass, so the CI evidence run always demonstrates it).
+    """
     failures: list[str] = []
 
     if p99_translation_ns >= P99_TRANSLATION_LIMIT_NS:
@@ -79,6 +90,8 @@ def evaluate_gates(
         failures.append("all_decisions_logged")
     if scenarios_in_defined_safe_state != scenario_count:
         failures.append("all_scenarios_in_defined_safe_state")
+    if advisory_descents is not None and advisory_descents == 0:
+        failures.append("advisory_descents_observed")
 
     return GateReport(passed=not failures, failures=tuple(failures))
 
@@ -117,6 +130,7 @@ class BenchmarkMetrics:
     step_calls: int = 0
     logged_records: int = 0
     violations: tuple[dict[str, float | int | str], ...] = ()
+    advisory: AdvisoryExperimentMetrics | None = None
 
     # ------------------------------------------------------------ aggregates
 
@@ -144,13 +158,20 @@ class BenchmarkMetrics:
         """One-line human summary for CI logs and completion notes."""
         tl = self.translation_latency_ns
         max_lat = self.max_transition_latency_us or -1
-        return (
+        text = (
             f"{self.corpus_trajectories} trajectories / {len(self.scenarios)} fault scenarios, "
             f"translation p50={tl.p50_ns}ns p99={tl.p99_ns}ns max={tl.max_ns}ns, "
             f"max transition={max_lat:.0f}us, "
             f"kinematic violations={self.kinematic_violation_count}, "
             f"decision logging={self.decision_logging_completeness:.1%}"
         )
+        if self.advisory is not None:
+            text += (
+                f", advisory descents={self.advisory.advisory_descents}"
+                f" ({self.advisory.descents_per_10k_cycles:.1f}/10k cycles),"
+                f" stale rejections={self.advisory.rejected_stale}"
+            )
+        return text
 
     def to_dict(self) -> dict:
         """The canonical JSON shape (sort_keys at dump time keeps bytes stable)."""
@@ -209,6 +230,9 @@ class BenchmarkMetrics:
             }
             for s in self.scenarios
         ]
+        # null when the advisory pass was disabled for this run — explicit
+        # "not run", distinct from a run that observed zero activity.
+        doc["advisory"] = self.advisory.to_dict() if self.advisory is not None else None
 
         report = gate_report(self)
         gates = report.gates
@@ -228,6 +252,9 @@ def gate_report(metrics: BenchmarkMetrics) -> GateReport:
         decision_logging_completeness=metrics.decision_logging_completeness,
         scenarios_in_defined_safe_state=metrics.scenarios_in_defined_safe_state,
         scenario_count=len(metrics.scenarios),
+        advisory_descents=(
+            metrics.advisory.advisory_descents if metrics.advisory is not None else None
+        ),
     )
 
 
