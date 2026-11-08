@@ -58,3 +58,10 @@ class GovernorConfig:
 
     cycle_dt_default_s: float = 1e-3
     """dt assumed for deceleration shaping on the first cycle after (re)start."""
+
+    advisory_max_age_ns: int = 100_000_000
+    """
+    Maximum age (time.monotonic_ns) of an advisory constraint before it counts
+    as stale and is rejected/expired — advisory staleness is treated like any
+    stale sensor input: no ladder movement, no margin effect.
+    """
