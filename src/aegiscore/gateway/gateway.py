@@ -29,6 +29,11 @@ from aegiscore.gateway.auth import (
     TrustStore,
     authenticate_peer,
 )
+from aegiscore.gateway.pinning import (
+    ArtifactDescriptor,
+    ArtifactPinStore,
+    ServingSurfaceKind,
+)
 
 
 class LeaseExpiredError(Exception):
@@ -53,6 +58,20 @@ class SessionLease:
 
     def is_valid_at(self, now_us: int) -> bool:
         return now_us < self.expires_us
+
+
+@dataclass(frozen=True)
+class ServingSurfaceSession:
+    """A lease-bound handle to one exposed serving surface.
+
+    Returned only after the artifact pin has been verified and the client has
+    authenticated; the surface rides the same session lease and nonce/replay
+    path as every other command.
+    """
+
+    surface: ServingSurfaceKind
+    artifact: ArtifactDescriptor
+    lease: SessionLease
 
 
 @dataclass(frozen=True)
@@ -101,6 +120,7 @@ class ZeroTrustGateway:
         client_role: str = "operator",
         lease_ttl_us: int = 5_000_000,  # 5 s of monotonic time
         max_command_age_us: int = 1_000_000,  # 1 s envelope freshness bound
+        pin_store: ArtifactPinStore | None = None,
     ) -> None:
         self._scal = scal
         self._trust_store = trust_store
@@ -109,6 +129,10 @@ class ZeroTrustGateway:
         self._max_command_age_us = max_command_age_us
         self._sessions: dict[str, SessionLease] = {}
         self._nonces = NonceRegistry()
+        self._pin_store = pin_store if pin_store is not None else ArtifactPinStore()
+        # Session id -> exposed serving surface. A surface exists for a peer
+        # only after artifact pinning and authentication both passed.
+        self._exposed_surfaces: dict[str, ServingSurfaceSession] = {}
 
     def open_session(
         self, client_certificate: Certificate, now_us: int
@@ -125,6 +149,42 @@ class ZeroTrustGateway:
         )
         self._sessions[session_id] = lease
         return identity, lease
+
+    @property
+    def pin_store(self) -> ArtifactPinStore:
+        """The operator-registered artifact pins this gateway enforces."""
+        return self._pin_store
+
+    def expose_serving_surface(
+        self,
+        surface: ServingSurfaceKind,
+        artifact: ArtifactDescriptor,
+        client_certificate: Certificate,
+        now_us: int,
+    ) -> ServingSurfaceSession:
+        """Expose a physicalai serving surface behind this gateway.
+
+        Preconditions, in order: the artifact is hash-pinned (unpinned or
+        mismatched digest/revision are refused before anything else happens),
+        then the client passes mutual authentication (mTLS) and receives a
+        session lease. The returned handle is bound to that lease; serving
+        traffic rides the same envelope path (lease expiry, nonce/replay
+        rejection) as command traffic. This is the ONLY way a serving surface
+        becomes reachable — there is no unpinned or unauthenticated route.
+        """
+        # Pinning first: a refusal must name the artifact, not the client,
+        # and must leave no session state behind.
+        self._pin_store.verify(artifact)
+        _, lease = self.open_session(client_certificate, now_us)
+        surface_session = ServingSurfaceSession(
+            surface=surface, artifact=artifact, lease=lease
+        )
+        self._exposed_surfaces[lease.session_id] = surface_session
+        return surface_session
+
+    def exposed_surface(self, session_id: str) -> ServingSurfaceSession | None:
+        """The serving surface exposed on a session, or None when there is none."""
+        return self._exposed_surfaces.get(session_id)
 
     def submit(self, envelope: CommandEnvelope, now_us: int) -> TaskCommand:
         """Assert the envelope, then (only then) hand the command to SCAL."""
