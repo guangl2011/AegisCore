@@ -25,6 +25,15 @@ from aegiscore.advisory.constraints import (
     pinned_model_ref,
     validate_source_model,
 )
+from aegiscore.advisory.factory import select_provider
+from aegiscore.advisory.onnx_provider import (
+    OnnxRuntimeAdvisoryProvider,
+    create_onnx_provider,
+)
+from aegiscore.advisory.openvino_provider import (
+    OpenVINOAdvisoryProvider,
+    create_openvino_provider,
+)
 from aegiscore.advisory.provider import (
     AdvisoryProvider,
     NullAdvisoryProvider,
@@ -38,9 +47,14 @@ __all__ = [
     "AdvisoryKind",
     "AdvisoryProvider",
     "NullAdvisoryProvider",
+    "OnnxRuntimeAdvisoryProvider",
+    "OpenVINOAdvisoryProvider",
     "ScoringAdvisoryProvider",
+    "create_onnx_provider",
+    "create_openvino_provider",
     "pinned_model_ref",
     "scalar_score",
+    "select_provider",
     "severity_from_score",
     "validate_source_model",
 ]

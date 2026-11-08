@@ -24,6 +24,9 @@ jobs:
       - name: Ruff lint
         run: ruff check .
 
+      - name: Import-graph gate (advisory decoupling invariants)
+        run: python scripts/check_import_graph.py
+
       - name: Pytest
         run: pytest -v
 
