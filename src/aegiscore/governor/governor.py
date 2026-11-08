@@ -15,8 +15,12 @@ Cycle precedence (first match wins):
    unmodeled faults descend toward CONTROLLED_STOP.
 3. Stale heartbeat (lease lost) descends toward HOLD.
 4. Sensor degradation is CONSERVATIVE; persistent loss descends toward HOLD.
-5. Stale or malformed commands are rejected (logged) without moving the ladder.
-6. Envelope filtering: proximity braking-distance barrier, kinetic-energy
+5. A zero advisory margin — the optional perception/anomaly layer's only
+   voice — descends toward FILTERED. Advisory constraints narrow margins the
+   deterministic core already owns; they never outrank a fault, never bypass
+   an envelope check, and never write or modify an actuator command.
+6. Stale or malformed commands are rejected (logged) without moving the ladder.
+7. Envelope filtering: proximity braking-distance barrier, kinetic-energy
    envelope, and mode gates (CONSERVATIVE speed cap, high-energy refusal).
 
 A cycle with an active fault stops actuating immediately: upper-rung fault
@@ -43,6 +47,11 @@ from aegiscore.core.model import (
     GovMode,
     RobotState,
     TaskCommand,
+)
+from aegiscore.governor.advisory_input import (
+    AdvisoryInputError,
+    AdvisorySignal,
+    normalize_advisory,
 )
 from aegiscore.governor.config import GovernorConfig
 from aegiscore.governor.faults import Fault
@@ -99,6 +108,13 @@ class GovernorCore:
         self._healthy_cycles = 0
         self._blade_on = False
         self._seq = 0
+        # Advisory margin map (deliverable 7): kind -> remaining margin,
+        # 1.0 = full headroom. Fed only by on_advisory; narrowed with min();
+        # expired (reset) when the producing constraint goes stale. Advisory
+        # state can only ever tighten — it is never a command source.
+        self._advisory_margins: dict[str, float] = {}
+        self._advisory_issued_ns: dict[str, int] = {}
+        self._advisory_rejected = 0
 
     # ------------------------------------------------------------------ API
 
@@ -123,10 +139,21 @@ class GovernorCore:
         cmd: TaskCommand | None,
         now_us: int,
         fault: Fault | None = None,
+        *,
+        now_monotonic_ns: int | None = None,
     ) -> GovernorDecision:
-        """One deterministic supervisor cycle: validate, filter, decide, log."""
+        """One deterministic supervisor cycle: validate, filter, decide, log.
+
+        ``now_monotonic_ns`` (the same ``time.monotonic_ns()`` clock the
+        advisory layer stamps on its constraints) is optional: when supplied,
+        stale advisory margins are expired before classification — a stale
+        advisory constraint is treated like any stale sensor input and has no
+        effect on the cycle. Omitting it keeps the cycle a pure function of
+        ``now_us`` and the governor's counters (bench-harness mode).
+        """
         t0 = time.perf_counter_ns()
         transition_from = self._fsm.mode
+        self._expire_advisory(now_monotonic_ns)
         assessment = self._classify(state, cmd, now_us, fault)
 
         if assessment.kind is _Kind.EMERGENCY:
@@ -187,6 +214,57 @@ class GovernorCore:
         self._degraded_cycles = 0
         return True
 
+    def on_advisory(
+        self, constraint: AdvisorySignal, *, now_monotonic_ns: int | None = None
+    ) -> bool:
+        """Consume one advisory constraint as a margin input. Advisory-only.
+
+        Narrows the matching margin with ``min(margin, 1 - severity)`` — the
+        spec's consumption contract. Returns whether the constraint was
+        accepted; malformed or stale input is rejected without moving the
+        ladder (a stale advisory is treated like any stale sensor input, and
+        the advisory layer has no API to write or modify actuator commands —
+        this method constructs nothing). The descent itself happens in the
+        next ``step`` cycle, so the safety log records the
+        ``advisory:<kind>`` reason with the transition it produced.
+
+        ``now_monotonic_ns`` enables the intake-time freshness check against
+        ``issued_monotonic_ns``; freshness is also enforced at step time, so
+        callers that never pass it remain safe (margins merely persist).
+        """
+        try:
+            kind, severity, issued_ns = normalize_advisory(constraint)
+        except AdvisoryInputError:
+            self._advisory_rejected += 1
+            return False
+        if (
+            now_monotonic_ns is not None
+            and now_monotonic_ns - issued_ns > self._cfg.advisory_max_age_ns
+        ):
+            self._advisory_rejected += 1
+            return False
+        margin = self._advisory_margins.get(kind, 1.0)
+        self._advisory_margins[kind] = min(margin, 1.0 - severity)
+        self._advisory_issued_ns[kind] = max(self._advisory_issued_ns.get(kind, -1), issued_ns)
+        return True
+
+    def _expire_advisory(self, now_monotonic_ns: int | None) -> None:
+        """Drop advisory margins whose producing constraint went stale."""
+        if now_monotonic_ns is None:
+            return
+        for kind in list(self._advisory_margins):
+            issued_ns = self._advisory_issued_ns.get(kind)
+            if issued_ns is None or now_monotonic_ns - issued_ns > self._cfg.advisory_max_age_ns:
+                del self._advisory_margins[kind]
+                self._advisory_issued_ns.pop(kind, None)
+
+    def _advisory_zero_kind(self) -> str | None:
+        """First (sorted) advisory kind with no remaining margin, if any."""
+        for kind in sorted(self._advisory_margins):
+            if self._advisory_margins[kind] <= 0.0:
+                return kind
+        return None
+
     # ------------------------------------------------------------ classification
 
     def _classify(
@@ -225,6 +303,15 @@ class GovernorCore:
             # Any fault without a dedicated mapping defaults to CONTROLLED_STOP,
             # never NOMINAL — the fail-safe default rule.
             return _Assessment(_Kind.DESCENT, GovMode.CONTROLLED_STOP, "unmodeled_fault")
+        # Advisory (deliverable 7): a zero advisory margin descends toward
+        # FILTERED — checked last, so every fault class above outranks it and
+        # it never bypasses the envelope checks below. In a mode deeper than
+        # FILTERED the descent is a no-op (the FSM never ascends) and the
+        # cycle keeps supervising normally — an advisory must not turn a
+        # deeper rung's behaviour into fault-cycle braking.
+        zero_kind = self._advisory_zero_kind()
+        if zero_kind is not None and self._fsm.mode in (GovMode.NOMINAL, GovMode.FILTERED):
+            return _Assessment(_Kind.DESCENT, GovMode.FILTERED, f"advisory:{zero_kind}")
         return _Assessment(_Kind.NONE, None, None)
 
     def _braking_lost(self, state: RobotState) -> bool:
@@ -356,7 +443,10 @@ class GovernorCore:
 
         # Unfiltered admission with positive margins: recovery path for FILTERED.
         self._healthy_cycles += 1
-        if mode is GovMode.FILTERED:
+        if mode is GovMode.FILTERED and self._advisory_zero_kind() is None:
+            # A zero advisory margin holds the rung: no recovery past an
+            # advisory that says there is no headroom (advisory narrows, never
+            # widens, the core's own margins).
             self._fsm.try_recover(GovMode.NOMINAL, "margins_recovered")
         if self._fsm.mode is GovMode.CONSERVATIVE:
             self._maybe_recover_nominal()
@@ -377,13 +467,19 @@ class GovernorCore:
             return None, "high_energy_command_refused"
         self._blade_on = True
         self._healthy_cycles += 1
-        if mode is GovMode.FILTERED:
+        if mode is GovMode.FILTERED and self._advisory_zero_kind() is None:
             self._fsm.try_recover(GovMode.NOMINAL, "margins_recovered")
         return ActuatorCommand(self._blade_id, "blade_on", 1.0, now_us), None
 
     def _maybe_recover_nominal(self) -> None:
-        """Table recovery exit: a healthy streak lifts CONSERVATIVE to NOMINAL."""
-        if self._healthy_cycles >= self._cfg.conservative_recovery_cycles:
+        """Table recovery exit: a healthy streak lifts CONSERVATIVE to NOMINAL.
+
+        Held while an advisory margin is zero — the same no-recovery-past-
+        zero-headroom rule as the FILTERED exit.
+        """
+        if self._healthy_cycles >= self._cfg.conservative_recovery_cycles and (
+            self._advisory_zero_kind() is None
+        ):
             self._fsm.try_recover(GovMode.NOMINAL, "recovery_streak")
 
     # ------------------------------------------------------------------ physics
@@ -418,6 +514,11 @@ class GovernorCore:
         v = self._measured_v(state)
         put("kinetic_energy_j", self._ke_limit_j - 0.5 * cfg.chassis_mass_kg * v * v)
         put("heartbeat_us", cfg.heartbeat_lease_us - (now_us - state.last_heartbeat_us))
+        # Advisory margins (deliverable 7): remaining headroom per fed kind,
+        # logged so the descent reason advisory:<kind> is traceable to the
+        # margin that produced it.
+        for kind, margin in sorted(self._advisory_margins.items()):
+            put(f"advisory_{kind}", margin)
         d = state.nearest_obstacle_m
         if d is not None:
             put("proximity_m", d - cfg.safe_margin_m)
