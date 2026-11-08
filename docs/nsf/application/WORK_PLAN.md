@@ -2,7 +2,7 @@
 
 *Spotlize1 · NSF SBIR Phase I · Prepared for further improvement and optimization*
 
-> **Provenance note (not part of the submission).** Structure and risks come from the approved spec (art_Ie4Y09VE) and [docs/aegiscore/DEVELOPMENT_PLAN.md](../../aegiscore/DEVELOPMENT_PLAN.md); measured numbers come from `benchmarks/latest.json` (commit `b3faa97`). Narrative source of truth: [docs/nsf/PITCH.md](../PITCH.md).
+> **Provenance note (not part of the submission).** Structure and risks come from the approved spec (art_Ie4Y09VE) and [docs/aegiscore/DEVELOPMENT_PLAN.md](../../aegiscore/DEVELOPMENT_PLAN.md); measured numbers come from `benchmarks/latest.json` (benchmark snapshot at commit `5c3cd65`; advisory figures from the harness's stub-provider experiment — CI runs no inference runtime). Narrative source of truth: [docs/nsf/PITCH.md](../PITCH.md).
 
 ## Plan summary
 
@@ -42,6 +42,12 @@ Run the Aim 3 experiment the MVP could only scaffold: hardware-in-the-loop bench
 
 *Deliverables:* trial reports on 3 platforms; measured adapter-complexity reduction; loss-of-network safety record. *Success criterion:* ≥ 30% adapter configuration-complexity reduction versus per-OEM integration and zero safety compromise under loss-of-network (Aim 3 closed).
 
+### Advisory-layer maturation (parallel track, M2–M4)
+
+Harden the M1 advisory layer from stub-provider evidence to real-inference evidence on Intel edge hardware. Run OpenVINO-compiled advisory models on Core Ultra-class NPUs (with the silent degrade-to-CPU path exercised on target hardware), measure end-to-end advisory constraint latency from frame/telemetry to published constraint, and record which provider served each trial session. Model artifacts stay hash-pinned to reviewed revisions and admitted only through the gateway's pinning boundary; licenses are recorded per pinned artifact, never assumed per repository.
+
+*Deliverables:* advisory latency report on target hardware; provider-degradation validation record; per-artifact license register. *Success criterion:* advisory end-to-end latency measured on target hardware and the no-command invariant re-proven with real providers — the governor still passes every safety-gate test with advisory constraints in the loop.
+
 ### M5 — Verification, documentation, and submission package
 
 Formal-methods review of the safety-supervisor and control algorithms with Dr. Jizhong Xiao's group (subaward); safety case documentation; the domestic hardware-assurance topology engineered for verifiable U.S. surface-mount assembly with hardware root of trust and auditable microcode.
@@ -61,3 +67,7 @@ M2 and M3 run in parallel (adapters on the host side, MCU port on the safety sid
 | **HIL deferred — no software-only substitute for Aim 3** | ≥ 30% adapter reduction and zero safety compromise under network loss cannot be produced in simulation | The MVP ships the measurement scaffold (configuration-surface counting, network-loss fault class); M4's trials on 3 platforms are the named remaining Phase I work, never presented as done |
 | **Fault isolation inside proprietary drivers** | Trapping faults within closed motor drivers without cascading bus faults | Bounded-deceleration fallbacks and the braking-loss e-stop path, tested in the fault matrix; adapter work at M2 validates the boundary on real buses |
 | **Pitch number without a source** | Any market or performance figure without provenance fails review | Market figures come from cited research ($2.1–2.8B in 2025 → ~$3.4B by 2030, CAGR 10–14%: Ken Research, DataIntelo, Mordor Intelligence); performance figures come only from harness output or are stated as named Phase I targets |
+| **Pre-1.0 API churn in the advisory stack** | The physicalai/OpenVINO stack is pre-1.0 with breaking deprecations inside a 30-day window; silent breakage would reach CI undetected | Exact-version pins, integration against public documented APIs only, upgrade smoke tests in CI, and an onnxruntime fallback bounding the runtime dependency |
+| **Intel lock-in / preview-quality suites** | Intel's robotics suites self-label preview; the umbrella repo is frozen after 2026.2 with release tags re-cut in a migration window — paths rot | Pin the standalone repo at a tagged release, target standalone-repo paths, re-verify at every upgrade; the deterministic core takes no Intel dependency, so the safety claims survive a total stack exit |
+| **NPU unavailability or driver instability** | A flaky NPU would gut the advisory acceleration story in trials | Silent degrade to CPU provider, then onnxruntime, then null — the command path never depends on the layer; trial sessions record which provider served them |
+| **Model/artifact licensing** | The advisory stack vendors third-party submodules and models under their own terms; some Intel samples ship under restrictive licenses | License check per pinned artifact, recorded alongside the gateway's SHA-256 pinning — never a per-repository assumption |
