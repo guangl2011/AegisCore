@@ -34,13 +34,19 @@ from the metrics JSON to keep the document byte-stable.
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from aegiscore.core.model import GovernorDecision, GovMode, TaskCommand
 from aegiscore.gateway.auth import Certificate, TrustStore
 from aegiscore.gateway.gateway import CommandEnvelope, ZeroTrustGateway
 from aegiscore.governor import Fault, GovernorConfig, GovernorCore
 from aegiscore.governor.fsm import LADDER
+from aegiscore.harness.advisory_exp import (
+    SIM_MONOTONIC_NS_PER_US,
+    AdvisoryExperimentConfig,
+    AdvisoryExperimentMetrics,
+    AdvisoryWiring,
+)
 from aegiscore.harness.metrics import BenchmarkMetrics, ScenarioRecord
 from aegiscore.scal.corpus import CORPUS_SEED, CORPUS_SIZE, Trajectory, build_corpus
 from aegiscore.scal.instrumentation import (
@@ -143,6 +149,12 @@ class BenchConfig:
     #: byte-identical across runs (the harness determinism test).
     clock: Clock | None = None
     breach_seed: BreachSeed | None = None
+    #: The advisory-layer experiment pass (stub providers). Enabled by default
+    #: — the CI evidence run always carries the advisory block; set to None to
+    #: run the deterministic cores without it.
+    advisory: AdvisoryExperimentConfig | None = field(
+        default_factory=AdvisoryExperimentConfig
+    )
 
 
 # --------------------------------------------------------------- plan bridge
@@ -228,12 +240,14 @@ def _cycle_step(
     now_us: int,
     fault: Fault | None = None,
     override_twist: tuple[float, float] | None = None,
+    now_monotonic_ns: int | None = None,
 ) -> GovernorDecision:
     """One fixed-timestep cycle: state, governor decision, actuation.
 
     ``override_twist`` replaces the executed twist for the cycle (the seeded
     breach: the supervisor still cycles and logs, but its decision is not what
-    reaches the actuators).
+    reaches the actuators). ``now_monotonic_ns`` feeds the governor's advisory
+    freshness clock — supplied only by the advisory experiment pass.
     """
     state = sim.make_state(now_us)
     if plan.is_motion:
@@ -246,7 +260,7 @@ def _cycle_step(
             params={"on": 1.0 if plan.blade_on else 0.0},
             issued_us=now_us,
         )
-    decision = governor.step(state, cmd, now_us, fault=fault)
+    decision = governor.step(state, cmd, now_us, fault=fault, now_monotonic_ns=now_monotonic_ns)
     if plan.is_motion:
         v, omega = override_twist if override_twist is not None else executed_twist(plan, decision)
         sim.integrate(v, omega)
@@ -288,8 +302,14 @@ def run_nominal_trajectory(
     translator: InstrumentedTranslator,
     dt_us: int = SIM_DT_US,
     breach: BreachSeed | None = None,
+    advisory: AdvisoryWiring | None = None,
 ) -> TrajectoryRunResult:
-    """Run one corpus trajectory through gateway -> SCAL -> governor -> sim."""
+    """Run one corpus trajectory through gateway -> SCAL -> governor -> sim.
+
+    ``advisory`` (the experiment pass) observes every cycle before the
+    governor steps and feeds any constraint through ``on_advisory`` — the
+    command path itself is untouched either way.
+    """
     sim = ChassisSim(profile, dt_us)
     governor = GovernorCore(sim.governor_profile, GovernorConfig())
     bridge = _ScalBridge(translator, profile)
@@ -329,10 +349,19 @@ def run_nominal_trajectory(
                 ):
                     override = (breach.speed_mps, 0.0)
                     breach_armed = False
-                _cycle_step(sim, governor, plan, now_us, override_twist=override)
+                now_monotonic_ns = now_us * SIM_MONOTONIC_NS_PER_US
+                if advisory is not None:
+                    advisory.before_cycle(governor, now_monotonic_ns)
+                _cycle_step(
+                    sim, governor, plan, now_us, override_twist=override,
+                    now_monotonic_ns=now_monotonic_ns,
+                )
                 steps += 1
                 cycle_index += 1
                 now_us += dt_us
+
+    if advisory is not None:
+        advisory.collect(governor)
 
     return TrajectoryRunResult(
         trajectory_id=traj.trajectory_id,
@@ -376,6 +405,7 @@ def run_fault_scenario(
     *,
     dt_us: int = SIM_DT_US,
     onset_cycle: int,
+    advisory: AdvisoryWiring | None = None,
 ) -> ScenarioRecord:
     """Inject one fault class mid-mission and record the fail-safe response.
 
@@ -400,11 +430,20 @@ def run_fault_scenario(
                     sim.place_obstacle(PROXIMITY_SCENARIO_OBSTACLE_M)
                 else:
                     fault_arg = fault
-            _cycle_step(sim, governor, plan, now_us=cycle_index * dt_us, fault=fault_arg)
+            now_monotonic_ns = cycle_index * dt_us * SIM_MONOTONIC_NS_PER_US
+            if advisory is not None:
+                advisory.before_cycle(governor, now_monotonic_ns)
+            _cycle_step(
+                sim, governor, plan, now_us=cycle_index * dt_us, fault=fault_arg,
+                now_monotonic_ns=now_monotonic_ns,
+            )
             if arrival_cycle < 0 and _at_or_below(governor.mode, mapped):
                 arrival_cycle = cycle_index
             steps += 1
             cycle_index += 1
+
+    if advisory is not None:
+        advisory.collect(governor)
 
     final_mode = governor.mode
     logged_records = len(governor.safety_log.records)
@@ -431,6 +470,30 @@ def run_fault_scenario(
     )
 
 
+def fault_onsets(
+    corpus: list[Trajectory],
+    *,
+    dt_us: int = SIM_DT_US,
+    seed: int = FAULT_MATRIX_SEED,
+) -> list[tuple[ScalProfile, Fault, int]]:
+    """The seeded (chassis, fault, onset-cycle) schedule of the fault matrix.
+
+    Single source of truth for onset sampling: the evidence pass and the
+    advisory pass must run the *same* scenarios, so the advisory pass mirrors
+    exactly these onsets.
+    """
+    rng = random.Random(seed)
+    schedule: list[tuple[ScalProfile, Fault, int]] = []
+    for profile in REFERENCE_PROFILES.values():
+        traj = next(t for t in corpus if t.profile_name == profile.model)
+        plans = _trajectory_plans(traj, profile, dt_us)
+        total_cycles = sum(plan.n_cycles for plan in plans)
+        low, high = _onset_window(total_cycles)
+        for fault in Fault:
+            schedule.append((profile, fault, rng.randrange(low, high)))
+    return schedule
+
+
 def run_fault_matrix(
     corpus: list[Trajectory],
     *,
@@ -438,22 +501,59 @@ def run_fault_matrix(
     seed: int = FAULT_MATRIX_SEED,
 ) -> tuple[ScenarioRecord, ...]:
     """Every fault class across all three reference chassis (3 x 8 scenarios)."""
-    rng = random.Random(seed)
     records: list[ScenarioRecord] = []
-    for profile in REFERENCE_PROFILES.values():
+    for profile, fault, onset in fault_onsets(corpus, dt_us=dt_us, seed=seed):
         traj = next(t for t in corpus if t.profile_name == profile.model)
-        plans = _trajectory_plans(traj, profile, dt_us)
-        total_cycles = sum(plan.n_cycles for plan in plans)
-        low, high = _onset_window(total_cycles)
-        for fault in Fault:
-            onset = rng.randrange(low, high)
-            records.append(
-                run_fault_scenario(profile, fault, plans, dt_us=dt_us, onset_cycle=onset)
+        records.append(
+            run_fault_scenario(
+                profile, fault, _trajectory_plans(traj, profile, dt_us),
+                dt_us=dt_us, onset_cycle=onset,
             )
+        )
     return tuple(records)
 
 
 # --------------------------------------------------------------- benchmark
+
+
+def run_advisory_experiment(
+    corpus: list[Trajectory],
+    *,
+    config: AdvisoryExperimentConfig,
+    fault_matrix_seed: int = FAULT_MATRIX_SEED,
+    dt_us: int = SIM_DT_US,
+    clock: Clock | None = None,
+) -> AdvisoryExperimentMetrics:
+    """Run the advisory pass over the corpus and fault matrix with stub providers.
+
+    Mirrors the evidence pass scenario-for-scenario (same trajectories, same
+    seeded fault onsets) with the stub advisory provider wired before every
+    governor cycle. Only the wiring's advisory counters and latency reports
+    are kept — the pass re-derives the same sim behaviour, and its latency
+    samples are discarded so translation evidence comes solely from the
+    nominal evidence pass.
+    """
+    wiring = AdvisoryWiring(config, clock=clock)
+    for traj in corpus:
+        profile = REFERENCE_PROFILES[traj.profile_name]
+        run_nominal_trajectory(
+            traj,
+            profile,
+            translator=InstrumentedTranslator(clock=clock),
+            dt_us=dt_us,
+            advisory=wiring,
+        )
+    for profile, fault, onset in fault_onsets(corpus, dt_us=dt_us, seed=fault_matrix_seed):
+        traj = next(t for t in corpus if t.profile_name == profile.model)
+        run_fault_scenario(
+            profile,
+            fault,
+            _trajectory_plans(traj, profile, dt_us),
+            dt_us=dt_us,
+            onset_cycle=onset,
+            advisory=wiring,
+        )
+    return wiring.metrics()
 
 
 def run_benchmark(config: BenchConfig | None = None) -> BenchmarkMetrics:
@@ -513,6 +613,18 @@ def run_benchmark(config: BenchConfig | None = None) -> BenchmarkMetrics:
                 }
             )
 
+    advisory_metrics = (
+        run_advisory_experiment(
+            corpus,
+            config=cfg.advisory,
+            fault_matrix_seed=cfg.fault_matrix_seed,
+            dt_us=cfg.sim_dt_us,
+            clock=cfg.clock,
+        )
+        if cfg.advisory is not None
+        else None
+    )
+
     return BenchmarkMetrics(
         corpus_seed=cfg.corpus_seed,
         corpus_size=cfg.corpus_size,
@@ -529,4 +641,5 @@ def run_benchmark(config: BenchConfig | None = None) -> BenchmarkMetrics:
         step_calls=corpus_steps + scenario_steps,
         logged_records=corpus_logged + scenario_logged,
         violations=tuple(violations),
+        advisory=advisory_metrics,
     )
