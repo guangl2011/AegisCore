@@ -12,6 +12,15 @@ license = { text = "Proprietary" }
 dependencies = []
 
 [project.optional-dependencies]
+advisory = [
+    # Exact pin per spec locked decision: physicalai is pre-1.0 with weekly
+    # releases and in-window breaking deprecations — bump deliberately after
+    # a smoke test, never loosely. Integration targets public documented APIs
+    # only (docs.openvino.ai/2026/physical-ai).
+    "physicalai==0.4.0",
+    # Fallback inference runtime for non-Intel / no-OpenVINO hosts.
+    "onnxruntime>=1.17",
+]
 dev = [
     "pytest>=8.0",
     "ruff>=0.4",
